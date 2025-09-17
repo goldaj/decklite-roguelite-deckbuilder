@@ -27,7 +27,7 @@ def load_assets():
     ASSETS["card_frame"]=load_img("cards/frame.png")
     for icon in ["sword","shield","energy","draw","beam","heart","shop","coin"]:
         ASSETS["icon_"+icon]=load_img(f"icons/{icon}.png")
-    for e in ["bandit","raptor","guardian"]:
+    for e in ["bandit","raptor","guardian","obliterator"]:
         ASSETS["enemy_"+e]=load_img(f"enemies/{e}.png")
     ASSETS["glow"]=load_img("fx/glow.png"); ASSETS["particle"]=load_img("fx/particle.png")
 
@@ -79,13 +79,19 @@ class CardLib:
            Card("Affaiblir",1,"Cible inflige -25% dégâts (2 tours)","draw",apply_weak=2),
            Card("Poison",1,"Applique 4 poison","energy",apply_poison=4),
            Card("Rage",1,"+50% dégâts ce tour","sword",gain_rage=1),
-           Card("Épines",1,"Gagne Épines 3","shield",gain_thorns=3),
-           Card("Plastron",2,"Gagne Plastron 3 par tour","shield",gain_plated=3)]
+           Card("Épines",1,"Épines 3 pendant 3 tours","shield",gain_thorns=3),
+           Card("Plastron",1,"+3 block pendant 3 tours","shield",gain_plated=3),
+           Card("Plastron+",2,"+8 block pendant 3 tours","shield",gain_plated=8)]
         if unlocks.get("beam_card",False): p.append(Card("Rayon",2,"16 perçant","beam",damage=16,piercing=True))
         return p
     @staticmethod
     def starter(unlocks):
-        return [Card("Strike",1,"Inflige 6","sword",damage=6) for _ in range(5)] + [Card("Defend",1,"Gain 5","shield",block=5) for _ in range(5)]
+        count_attack = 5
+        count_defend = 5
+        count_heal = max(1, count_defend//4)  # 4x moins de soin que de defend
+        return ([Card("Strike",1,"Inflige 6","sword",damage=6) for _ in range(count_attack)] +
+                [Card("Defend",1,"Gain 5","shield",block=5) for _ in range(count_defend)] +
+                [Card("Soin",1,"Récupère 6 PV","heart",heal=6) for _ in range(count_heal)])
 
 class CardView:
     def __init__(self, card, rect):
@@ -143,15 +149,21 @@ def enemy_for_floor(f):
             e = Enemy(f"Sentinelle {f}", base_hp+20, "enemy_guardian", [("def", defend+3), ("atk", atk2), ("atk", atk2+3), ("atk", atk2+4)])
             e.status["plated"]=1 + f//4
         return e
-    boss = Enemy("ARCHON (Boss)", 220, "enemy_guardian", [("def", 16), ("atk", 18), ("atk", 22), ("atk", 26), ("def", 20), ("atk", 28)])
-    boss.status["thorns"]=3; boss.status["plated"]=3
-    return boss
+    if f == 10:
+        boss = Enemy("ARCHON (Boss)", 220, "enemy_guardian", [("def", 16), ("atk", 18), ("atk", 22), ("atk", 26), ("def", 20), ("atk", 28)])
+        boss.status["thorns"]=3; boss.status["plated"]=3
+        return boss
+    if f == 11:
+        # Extreme boss: Obliterator
+        return Enemy("OBLITERATOR (Extreme)", 1200, "enemy_obliterator", [("def", 30), ("atk", 36), ("atk", 44), ("atk", 52), ("def", 40), ("atk", 60)])
 
 class Player:
     def __init__(self, save):
         self.up_hp=save["upgrades"]["max_hp"]; self.up_energy=save["upgrades"]["energy"]
         self.max_hp=70 + self.up_hp*20; self.hp=self.max_hp; self.energy_base=3 + self.up_energy; self.energy=self.energy_base; self.block=0
-        self.status={"rage":0,"thorns":0,"plated":0}
+        self.status={"rage":0}
+        self.plated_amt=0; self.plated_turns=0; self.turtle_amt=0
+        self.thorns_amt=0; self.thorns_turns=0
         self.deck=[c.clone() for c in CardLib.starter(save["unlocks"])]; random.shuffle(self.deck)
         self.discard=[]; self.hand=[]; self.draw_pile=list(self.deck); self.turn_draw=5
     def rebuild_piles_full(self):
@@ -164,7 +176,17 @@ class Player:
             self.hand.append(self.draw_pile.pop())
     def new_turn(self):
         self.energy=self.energy_base; self.block=0
-        if self.status.get("plated",0)>0: self.block+=self.status["plated"]
+        # TurtleShell relic per-turn block
+        if getattr(self,"turtle_amt",0)>0: self.block+=self.turtle_amt
+        # Timed Plastron buff
+        if self.plated_turns>0:
+            self.block+=self.plated_amt
+            self.plated_turns-=1
+        # Timed Thorns duration tick
+        if self.thorns_turns>0:
+            self.thorns_turns-=1
+            if self.thorns_turns==0:
+                self.thorns_amt=0
         self.draw(self.turn_draw)
     def play_card(self,idx,enemy):
         if idx<0 or idx>=len(self.hand): return False
@@ -175,7 +197,11 @@ class Player:
             dmg=c.damage
             if self.status.get("rage",0)>0: dmg=int(dmg*1.5)
             if hasattr(self, "run_relics") and "BattleFury" in self.run_relics: dmg+=2
+            hp0 = enemy.hp
             enemy.take_damage(dmg, piercing=c.piercing, source_is_player=True)
+            try:
+                if hasattr(self,"run") and self.run.is_obl(): self.run.obl_damage += max(0, hp0 - enemy.hp)
+            except Exception: pass
         if c.block>0: self.block+=c.block
         if c.draw>0: self.draw(c.draw)
         if c.energy>0: self.energy+=c.energy
@@ -184,8 +210,12 @@ class Player:
         if c.apply_weak>0: enemy.status["weak"]=min(99, enemy.status.get("weak",0)+c.apply_weak)
         if c.apply_poison>0: enemy.status["poison"]=min(999, enemy.status.get("poison",0)+c.apply_poison)
         if c.gain_rage>0: self.status["rage"]=max(self.status.get("rage",0), c.gain_rage)
-        if c.gain_thorns>0: self.status["thorns"]=min(99, self.status.get("thorns",0)+c.gain_thorns)
-        if c.gain_plated>0: self.status["plated"]=min(99, self.status.get("plated",0)+c.gain_plated)
+        if c.gain_thorns>0:
+            self.thorns_amt=c.gain_thorns
+            self.thorns_turns=3
+        if c.gain_plated>0:
+            self.plated_amt=c.gain_plated
+            self.plated_turns=3
         self.discard.append(c); del self.hand[idx]; return True
     def end_turn(self, enemy):
         it,val=enemy.intent
@@ -194,8 +224,12 @@ class Player:
             if enemy.status.get("weak",0)>0: dmg=int(dmg*0.75)
             if self.block>=dmg: self.block-=dmg
             else: dmg-=self.block; self.block=0; self.hp-=dmg
-            if self.status.get("thorns",0)>0 and dmg>0:
-                enemy.take_damage(self.status["thorns"], piercing=True, source_is_player=False)
+            if self.thorns_amt>0 and self.thorns_turns>0 and dmg>0:
+                hp0 = enemy.hp
+                enemy.take_damage(self.thorns_amt, piercing=True, source_is_player=False)
+                try:
+                    if hasattr(self,"run") and self.run.is_obl(): self.run.obl_damage += max(0, hp0 - enemy.hp)
+                except Exception: pass
                 # visual feedback
                 tx,ty=  self.run.screen_w-300 if hasattr(self.run,"screen_w") else 980, 150
                 try:
@@ -216,14 +250,18 @@ class DamageText:
     def draw(self,s,font): y=self.y-int(40*ease_out_quad(clamp(self.t,0,1))); a=int(255*(1-clamp(self.t,0,1))); t=font.render(self.txt, True, self.col); t.set_alpha(a); s.blit(t,(self.x,y))
 
 class Run:
+    def is_obl(self):
+        return self.enemy and self.enemy.name.startswith("OBLITERATOR")
     def __init__(self, save):
-        self.save=save; self.floor=1; self.player=Player(save); self.enemy=enemy_for_floor(self.floor); self.enemy.choose_intent()
+        self.save=save; self.floor=1; self.player=Player(save); self.player.run=self; self.enemy=enemy_for_floor(self.floor); self.enemy.choose_intent()
         self.done=False; self.win=False; self.particles=[]; self.dmg_numbers=[]; self.message=""; self.player.new_turn()
+        # Extreme boss tracking
+        self.obl_damage=0
         # relics per run
         self.relics=[]; pool=self.save.get("relics_unlocked",[])
         if pool: self.relics=[random.choice(pool)]
         self.player.run_relics=self.relics
-        if "TurtleShell" in self.relics: self.player.status["plated"]+=2
+        if "TurtleShell" in self.relics: self.player.turtle_amt += 2
         if "AdrenalGland" in self.relics: self.player.turn_draw+=1
         if "AncientCoin" in self.relics: self.player.energy+=1
     def update(self,dt):
@@ -233,7 +271,7 @@ class Run:
         self.player.end_turn(self.enemy)
         # end of round: poison ticks, decay statuses on enemy
         if self.enemy.status.get("poison",0)>0:
-            dmg=self.enemy.status["poison"]; self.enemy.take_damage(dmg, piercing=True); self.enemy.status["poison"]=max(0,self.enemy.status["poison"]-1)
+            dmg=self.enemy.status["poison"]; hp0=self.enemy.hp; self.enemy.take_damage(dmg, piercing=True); self.obl_damage += max(0, hp0 - self.enemy.hp); self.enemy.status["poison"]=max(0,self.enemy.status["poison"]-1)
             # feedback
             tx = getattr(self, "screen_w", 1280) - 300; ty = 150
             self.dmg_numbers.append(DamageText(tx, ty, f"-{dmg} (poison)", (170,255,170)))
@@ -248,8 +286,9 @@ class Run:
                 self.enemy=enemy_for_floor(self.floor); self.enemy.choose_intent(); return "reward"
         self.enemy.choose_intent(); self.player.new_turn()
     def essence_gain(self):
-        base = 12 * (self.floor - 1)
+        base = 12 * (max(0,self.floor - 1))
         if self.win: base += 120
+        base += max(0, getattr(self,"obl_damage",0))
         return base
 
 STATE_MENU=0; STATE_SHOP=1; STATE_RUN=2; STATE_REWARD=3; STATE_GAMEOVER=4; STATE_EVENT=5
@@ -264,6 +303,7 @@ class Game:
         self.state=STATE_MENU; self.run=None; self.reward_options=[]; self.reward_rects=[]
         self.card_views=[]; self.hand_area=pygame.Rect(80, HEIGHT-300, WIDTH-240, 260); self.end_button=Button(WIDTH-200, HEIGHT-120, 160,60,"Fin", self.font, on_click=self.on_end_turn)
         self.show_draw=False; self.deck_button=Button(0, 0, 120, 44, "Deck", self.small, on_click=self.toggle_draw_panel)
+        self.event_choice_made=False; self.event_choice_text=""
     # Utilities
     def draw_bg(self):
         sw,sh=self.screen.get_size(); self.screen.blit(pygame.transform.smoothscale(ASSETS["bg"],(sw,sh)),(0,0))
@@ -281,8 +321,6 @@ class Game:
 
     # --- Status badges UI ---
     def draw_status_badges(self, x, y, statuses, who="enemy"):
-        # Draw small rounded badges like "Po 3", "Vu 2", "Wk 1", "Rg", "Th 3", "Pl 2"
-        # Colors per status
         col_map = {
             "poison": (160, 255, 160),
             "vuln": (255, 200, 160),
@@ -293,7 +331,7 @@ class Game:
         }
         keys = ["poison","vuln","weak","thorns","plated"]
         if who=="player":
-            keys = ["rage","thorns","plated"]
+            keys = ["rage"]
         pad=8; gap=6; cx=x
         for k in keys:
             v = statuses.get(k,0)
@@ -303,7 +341,7 @@ class Game:
             else:
                 if v<=0: continue
                 label = ("Po" if k=="poison" else "Vu" if k=="vuln" else "Wk" if k=="weak" else "Th" if k=="thorns" else "Pl") + f" {v}"
-                col = col_map[k]
+                col = col_map.get(k,(220,220,220))
             txt = self.small.render(label, True, (20,22,32))
             w = txt.get_width()+pad*2; h = txt.get_height()+4
             surf = pygame.Surface((w,h), pygame.SRCALPHA)
@@ -312,6 +350,30 @@ class Game:
             surf.blit(txt,(pad,2))
             self.screen.blit(surf,(cx,y))
             cx += w + gap
+        # Extra badge for timed Plastron on player
+        if who=="player":
+            try:
+                cx0=cx
+                if getattr(self.run.player,"plated_turns",0)>0:
+                    label = f"Pl {self.run.player.plated_amt}x{self.run.player.plated_turns}"
+                    txt = self.small.render(label, True, (20,22,32))
+                    w = txt.get_width()+pad*2; h = txt.get_height()+4
+                    surf = pygame.Surface((w,h), pygame.SRCALPHA)
+                    pygame.draw.rect(surf, col_map["plated"], (0,0,w,h), border_radius=8)
+                    pygame.draw.rect(surf, (40,44,60), (0,0,w,h), 1, border_radius=8)
+                    surf.blit(txt,(pad,2))
+                    self.screen.blit(surf,(cx,y)); cx += w + gap
+                if getattr(self.run.player,"thorns_turns",0)>0 and getattr(self.run.player,"thorns_amt",0)>0:
+                    label = f"Th {self.run.player.thorns_amt}x{self.run.player.thorns_turns}"
+                    txt = self.small.render(label, True, (20,22,32))
+                    w = txt.get_width()+pad*2; h = txt.get_height()+4
+                    surf = pygame.Surface((w,h), pygame.SRCALPHA)
+                    pygame.draw.rect(surf, col_map["thorns"], (0,0,w,h), border_radius=8)
+                    pygame.draw.rect(surf, (40,44,60), (0,0,w,h), 1, border_radius=8)
+                    surf.blit(txt,(pad,2))
+                    self.screen.blit(surf,(cx,y))
+            except Exception:
+                pass
 
     # Draw helpers
     def draw_enemy_panel(self):
@@ -369,16 +431,21 @@ class Game:
     def draw_event(self, events):
         self.draw_bg(); title=self.big.render("Événement", True, COL_UI)
         self.screen.blit(title,(self.screen.get_width()//2 - title.get_width()//2, 80))
-        opts=[("Se reposer","+25% PV (arrondi)", "rest"),
-              ("Trouver une relique","-8 PV, gagnez 1 relique", "relic"),
-              ("Purifier","Retirer une carte basique", "purge")]
+        has_relic_meta = bool(self.save.get("relics_unlocked"))
+        opts=[("Se reposer","+25% PV (arrondi)", "rest", True),
+              ("Trouver une relique","-8 PV, gagnez 1 relique" + ("" if has_relic_meta else "  [INDISPONIBLE]"), "relic", has_relic_meta),
+              ("Purifier","Retirer une carte basique", "purge", True)]
         self.event_rects=[]; y=200
-        for name,desc,key in opts:
+        for name,desc,key,enabled in opts:
             pnl=pygame.transform.smoothscale(ASSETS["panel"], (900,90)); self.screen.blit(pnl,(self.screen.get_width()//2-450,y))
-            self.screen.blit(self.font.render(name, True, COL_UI),(self.screen.get_width()//2-420, y+12))
+            col_txt = COL_SUB if (not enabled or self.event_choice_made) else COL_UI
+            self.screen.blit(self.font.render(name, True, col_txt),(self.screen.get_width()//2-420, y+12))
             self.screen.blit(self.small.render(desc, True, COL_SUB),(self.screen.get_width()//2-420, y+50))
-            self.event_rects.append((pygame.Rect(self.screen.get_width()//2-450,y,900,90), key)); y+=110
-        back=Button(self.screen.get_width()//2-110, y+20, 220, 60, "Continuer", self.font, on_click=self.event_continue); back.update(events); back.draw(self.screen)
+            self.event_rects.append((pygame.Rect(self.screen.get_width()//2-450,y,900,90), key, enabled)); y+=110
+        # Feedback line
+        info = self.small.render(self.event_choice_text if self.event_choice_text else "Choisissez UNE option.", True, COL_ACC if self.event_choice_text else COL_SUB)
+        self.screen.blit(info,(self.screen.get_width()//2 - info.get_width()//2, y+0))
+        back=Button(self.screen.get_width()//2-110, y+40, 220, 60, "Continuer", self.font, on_click=self.event_continue); back.update(events); back.draw(self.screen)
     def draw_run(self, dt, events):
         # store for feedback positioning
         if self.run:
@@ -429,25 +496,47 @@ class Game:
         for b in [menu, shop]: b.update(events); b.draw(self.screen)
     # Events
     def handle_event_click(self, pos):
-        for rect,key in self.event_rects:
+        for rect,key,enabled in self.event_rects:
             if rect.collidepoint(pos):
+                if self.event_choice_made: 
+                    self.event_choice_text="Vous avez déjà choisi."
+                    return
+                if not enabled:
+                    self.event_choice_text="Option indisponible: débloquez les reliques en boutique."
+                    return
                 if key=="rest":
                     heal = max(1, self.run.player.max_hp//4)
                     self.run.player.hp = min(self.run.player.max_hp, self.run.player.hp + heal)
+                    self.event_choice_text=f"+{heal} PV"
                 elif key=="relic":
+                    pool = self.save.get("relics_unlocked", [])
+                    if not pool:
+                        self.event_choice_text="Option indisponible: débloquez les reliques en boutique."
+                        return
                     self.run.player.hp = max(1, self.run.player.hp - 8)
-                    pool = ["TurtleShell","AdrenalGland","BattleFury","AncientCoin"]
                     pick = random.choice(pool)
                     if hasattr(self.run, "relics"): self.run.relics.append(pick)
+                    self.event_choice_text=f"Relique: {pick} (-8 PV)"
                 elif key=="purge":
                     names=["Strike","Defend"]
-                    removed=False
+                    removed_name=None
                     for nm in names:
                         for i,c in enumerate(self.run.player.deck):
                             if c.name==nm:
-                                del self.run.player.deck[i]; removed=True; break
-                        if removed: break
+                                removed_name=nm; del self.run.player.deck[i]; break
+                        if removed_name: break
+                    self.event_choice_text=("Retiré: "+removed_name) if removed_name else "Rien à retirer"
+                self.event_choice_made=True
+
     def event_continue(self):
+        # require a choice
+        if self.state==STATE_EVENT and not self.event_choice_made:
+            self.event_choice_text="Choisissez d'abord une option."
+            return
+        # after event, go to next combat
+        self.event_choice_made=False; self.event_choice_text=""
+        self.run.enemy=enemy_for_floor(self.run.floor); self.run.enemy.choose_intent(); self.state=STATE_RUN
+        self.run.player.rebuild_piles_full(); self.run.player.new_turn(); self.layout_hand()
         self.run.enemy=enemy_for_floor(self.run.floor); self.run.enemy.choose_intent(); self.state=STATE_RUN
         self.run.player.rebuild_piles_full(); self.run.player.new_turn(); self.layout_hand()
     # Actions / handlers
