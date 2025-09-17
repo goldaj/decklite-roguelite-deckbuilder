@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "essence": 23,
+  "upgrades": {
+    "max_hp": 7,
+    "energy": 2
+  },
+  "unlocks": {
+    "beam_card": true
+  }
+}
