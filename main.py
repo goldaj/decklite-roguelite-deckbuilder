@@ -131,7 +131,9 @@ class Enemy:
             ab=min(self.block,dmg); self.block-=ab; self.hp -= max(0,dmg-ab)
         self.hp=max(0,self.hp)
 
+
 def enemy_for_floor(f):
+    # Floors 1-9 scale; floor 10 is boss; floor 11 is extreme boss.
     if f <= 9:
         base_hp = 40 + f*10
         atk1 = 5 + f
@@ -154,8 +156,12 @@ def enemy_for_floor(f):
         boss.status["thorns"]=3; boss.status["plated"]=3
         return boss
     if f == 11:
-        # Extreme boss: Obliterator
-        return Enemy("OBLITERATOR (Extreme)", 1200, "enemy_obliterator", [("def", 30), ("atk", 36), ("atk", 44), ("atk", 52), ("def", 40), ("atk", 60)])
+        # Extreme boss: huge HP and heavy attacks. Essence equals HP removed on it.
+        return Enemy("OBLITERATOR (Extreme)", 1400, "enemy_obliterator",
+                     [("def", 30), ("atk", 44), ("atk", 52), ("atk", 64), ("def", 40), ("atk", 72)])
+    # Fallback: after 11, repeat 11
+    return Enemy("OBLITERATOR (Extreme)", 1400, "enemy_obliterator",
+                 [("def", 30), ("atk", 44), ("atk", 52), ("atk", 64), ("def", 40), ("atk", 72)])
 
 class Player:
     def __init__(self, save):
@@ -200,8 +206,10 @@ class Player:
             hp0 = enemy.hp
             enemy.take_damage(dmg, piercing=c.piercing, source_is_player=True)
             try:
-                if hasattr(self,"run") and self.run.is_obl(): self.run.obl_damage += max(0, hp0 - enemy.hp)
-            except Exception: pass
+                if hasattr(self,"run") and self.run.is_obl():
+                    self.run.obl_damage += max(0, hp0 - enemy.hp)
+            except Exception:
+                pass
         if c.block>0: self.block+=c.block
         if c.draw>0: self.draw(c.draw)
         if c.energy>0: self.energy+=c.energy
@@ -225,17 +233,15 @@ class Player:
             if self.block>=dmg: self.block-=dmg
             else: dmg-=self.block; self.block=0; self.hp-=dmg
             if self.thorns_amt>0 and self.thorns_turns>0 and dmg>0:
+                
                 hp0 = enemy.hp
                 enemy.take_damage(self.thorns_amt, piercing=True, source_is_player=False)
-                try:
-                    if hasattr(self,"run") and self.run.is_obl(): self.run.obl_damage += max(0, hp0 - enemy.hp)
-                except Exception: pass
-                # visual feedback
-                tx,ty=  self.run.screen_w-300 if hasattr(self.run,"screen_w") else 980, 150
-                try:
-                    self.run.dmg_numbers.append(DamageText(tx,ty,f"-{self.status['thorns']} (épines)",(255,190,190)))
-                except Exception:
-                    pass
+                if hasattr(self,"run") and self.run.is_obl():
+                    self.run.obl_damage += max(0, hp0 - enemy.hp)
+                # visuel épines
+                tx = getattr(self.run, "screen_w", 1280) - 300
+                ty = 150
+                self.run.dmg_numbers.append(DamageText(tx, ty, f"-{self.thorns_amt} (épines)", (255,190,190)))
         elif it=="def": enemy.block+=val
         self.status["rage"]=0
         self.discard.extend(self.hand); self.hand.clear()
@@ -279,7 +285,10 @@ class Run:
             if self.enemy.status.get(k,0)>0: self.enemy.status[k]-=1
         if self.player.hp<=0: self.done=True; self.win=False; return
         if self.enemy.hp<=0:
-            if self.floor>=10: self.done=True; self.win=True; return
+            if self.floor==11:
+                self.done=True; self.win=True; return
+            elif self.floor==10:
+                self.floor=11; self.player.block=0; self.enemy=enemy_for_floor(self.floor); self.enemy.choose_intent(); return None
             else:
                 self.floor+=1; self.player.block=0
                 if self.floor in (4,7,9): return "event"
@@ -303,7 +312,10 @@ class Game:
         self.state=STATE_MENU; self.run=None; self.reward_options=[]; self.reward_rects=[]
         self.card_views=[]; self.hand_area=pygame.Rect(80, HEIGHT-300, WIDTH-240, 260); self.end_button=Button(WIDTH-200, HEIGHT-120, 160,60,"Fin", self.font, on_click=self.on_end_turn)
         self.show_draw=False; self.deck_button=Button(0, 0, 120, 44, "Deck", self.small, on_click=self.toggle_draw_panel)
+        self.hover_targets=[]  # tooltip rects per frame
         self.event_choice_made=False; self.event_choice_text=""
+        self.modal = None  # modal d'événement (ex: {'type':'rest', ...})
+
     # Utilities
     def draw_bg(self):
         sw,sh=self.screen.get_size(); self.screen.blit(pygame.transform.smoothscale(ASSETS["bg"],(sw,sh)),(0,0))
@@ -320,7 +332,10 @@ class Game:
         for i,c in enumerate(self.run.player.hand): self.card_views.append(CardView(c, (start_x + i*(cw+gap), y, cw, ch)))
 
     # --- Status badges UI ---
+
+    # --- Status badges UI (rewritten for reliable tooltips) ---
     def draw_status_badges(self, x, y, statuses, who="enemy"):
+        # colors
         col_map = {
             "poison": (160, 255, 160),
             "vuln": (255, 200, 160),
@@ -329,53 +344,113 @@ class Game:
             "plated": (200, 255, 200),
             "rage": (255, 220, 120),
         }
-        keys = ["poison","vuln","weak","thorns","plated"]
-        if who=="player":
-            keys = ["rage"]
+        # compose list of (label, key, value, tooltip)
+        items = []
+        if who == "enemy":
+            # enemy uses raw counters in statuses
+            po = statuses.get("poison",0); vu = statuses.get("vuln",0); wk = statuses.get("weak",0)
+            th = statuses.get("thorns",0); pl = statuses.get("plated",0)
+            if po>0: items.append((f"Po {po}", "poison", po, f"Poison {po}: perd {po} PV vrais en fin de round, puis -1."))
+            if vu>0: items.append((f"Vu {vu}", "vuln", vu, f"Vulnérable {vu}: subit +50% dégâts. -1 par tour."))
+            if wk>0: items.append((f"Wk {wk}", "weak", wk, f"Affaibli {wk}: inflige -25% dégâts. -1 par tour."))
+            if th>0: items.append((f"Th {th}", "thorns", th, f"Épines {th}: renvoie des dégâts quand vous le frappez."))
+            if pl>0: items.append((f"Pl {pl}", "plated", pl, f"Plastron {pl}: gagne du block au début de son tour."))
+        else:
+            # player uses timed versions for thorns/plastron and a flag for rage
+            rg = statuses.get("rage",0)
+            if rg>0: items.append(("Rg", "rage", rg, "Rage: vos attaques font +50% dégâts ce tour."))
+            # timed plastron
+            pl_amt = getattr(self.run.player, "plated_amt", 0)
+            pl_turns = getattr(self.run.player, "plated_turns", 0)
+            if pl_turns>0 and pl_amt>0:
+                items.append((f"Pl {pl_amt}x{pl_turns}", "plated", pl_amt, f"Plastron {pl_amt}x{pl_turns}: gagne du block au début de votre tour, décrémente chaque tour."))
+            # timed thorns
+            th_amt = getattr(self.run.player, "thorns_amt", 0)
+            th_turns = getattr(self.run.player, "thorns_turns", 0)
+            if th_turns>0 and th_amt>0:
+                items.append((f"Th {th_amt}x{th_turns}", "thorns", th_amt, f"Épines {th_amt}x{th_turns}: renvoie des dégâts quand vous êtes frappé, décrémente chaque tour."))
+
+        # draw badges
         pad=8; gap=6; cx=x
-        for k in keys:
-            v = statuses.get(k,0)
-            if k=="rage":
-                if statuses.get("rage",0)>0: label="Rg"; col=col_map["rage"]
-                else: continue
-            else:
-                if v<=0: continue
-                label = ("Po" if k=="poison" else "Vu" if k=="vuln" else "Wk" if k=="weak" else "Th" if k=="thorns" else "Pl") + f" {v}"
-                col = col_map.get(k,(220,220,220))
+        for label, key, val, tip in items:
             txt = self.small.render(label, True, (20,22,32))
             w = txt.get_width()+pad*2; h = txt.get_height()+4
             surf = pygame.Surface((w,h), pygame.SRCALPHA)
-            pygame.draw.rect(surf, col, (0,0,w,h), border_radius=8)
+            pygame.draw.rect(surf, col_map.get(key,(230,230,230)), (0,0,w,h), border_radius=8)
             pygame.draw.rect(surf, (40,44,60), (0,0,w,h), 1, border_radius=8)
             surf.blit(txt,(pad,2))
             self.screen.blit(surf,(cx,y))
+            # tooltip rect
+            self.add_hover(pygame.Rect(cx,y,w,h), tip)
             cx += w + gap
-        # Extra badge for timed Plastron on player
-        if who=="player":
-            try:
-                cx0=cx
-                if getattr(self.run.player,"plated_turns",0)>0:
-                    label = f"Pl {self.run.player.plated_amt}x{self.run.player.plated_turns}"
-                    txt = self.small.render(label, True, (20,22,32))
-                    w = txt.get_width()+pad*2; h = txt.get_height()+4
-                    surf = pygame.Surface((w,h), pygame.SRCALPHA)
-                    pygame.draw.rect(surf, col_map["plated"], (0,0,w,h), border_radius=8)
-                    pygame.draw.rect(surf, (40,44,60), (0,0,w,h), 1, border_radius=8)
-                    surf.blit(txt,(pad,2))
-                    self.screen.blit(surf,(cx,y)); cx += w + gap
-                if getattr(self.run.player,"thorns_turns",0)>0 and getattr(self.run.player,"thorns_amt",0)>0:
-                    label = f"Th {self.run.player.thorns_amt}x{self.run.player.thorns_turns}"
-                    txt = self.small.render(label, True, (20,22,32))
-                    w = txt.get_width()+pad*2; h = txt.get_height()+4
-                    surf = pygame.Surface((w,h), pygame.SRCALPHA)
-                    pygame.draw.rect(surf, col_map["thorns"], (0,0,w,h), border_radius=8)
-                    pygame.draw.rect(surf, (40,44,60), (0,0,w,h), 1, border_radius=8)
-                    surf.blit(txt,(pad,2))
-                    self.screen.blit(surf,(cx,y))
-            except Exception:
-                pass
+
+
+    # --- Hover tooltip helpers ---
+    def add_hover(self, rect, text):
+        # rect: pygame.Rect; text: str
+        self.hover_targets.append((rect, text))
+
+    def draw_tooltip(self):
+        if not self.hover_targets: return
+        mx, my = pygame.mouse.get_pos()
+        hit = None
+        for rect, text in self.hover_targets:
+            if rect.collidepoint(mx, my):
+                hit = text; break
+        if not hit: return
+        # simple word wrap ~48 chars
+        words = hit.split(' ')
+        lines=[]; cur=""
+        for w in words:
+            if len(cur)+len(w)+1>48:
+                lines.append(cur); cur=w
+            else:
+                cur=(cur+" "+w).strip()
+        if cur: lines.append(cur)
+        pad=10
+        surfaces=[self.small.render(t, True, (20,22,32)) for t in lines]
+        w=max(s.get_width() for s in surfaces)+pad*2
+        h=sum(s.get_height() for s in surfaces)+pad*2+(len(surfaces)-1)*2
+        tip=pygame.Surface((w,h), pygame.SRCALPHA)
+        pygame.draw.rect(tip,(235,240,255,235),(0,0,w,h),border_radius=8)
+        pygame.draw.rect(tip,(80,90,120,255),(0,0,w,h),1,border_radius=8)
+        y=pad
+        for srf in surfaces:
+            tip.blit(srf,(pad,y)); y+=srf.get_height()+2
+        dx,dy=18,18
+        sx,sy=mx+dx,my+dy
+        sw,sh=self.screen.get_size()
+        if sx+w>sw: sx=mx-w-12
+        if sy+h>sh: sy=my-h-12
+        self.screen.blit(tip,(sx,sy))
 
     # Draw helpers
+    def draw_relics(self, x, y):
+        # Render player's relics as badges with hover tooltips
+        if not (hasattr(self.run, "relics") and self.run.relics):
+            return
+        relic_desc = {
+            "TurtleShell":"Au début de chaque tour, gagne un montant fixe de block.",
+            "AdrenalGland":"+1 carte piochée par tour.",
+            "BattleFury":"+2 dégâts sur toutes vos attaques.",
+            "AncientCoin":"+1 énergie au premier tour du combat."
+        }
+        rx, ry = x, y
+        pad=8; gap=6
+        for rname in self.run.relics:
+            label = rname
+            txt = self.small.render(label, True, (20,22,32))
+            w = txt.get_width()+pad*2; h = txt.get_height()+4
+            surf = pygame.Surface((w,h), pygame.SRCALPHA)
+            pygame.draw.rect(surf, (255,245,170), (0,0,w,h), border_radius=8)
+            pygame.draw.rect(surf, (120,100,40), (0,0,w,h), 1, border_radius=8)
+            surf.blit(txt,(pad,2))
+            self.screen.blit(surf,(rx,ry))
+            # tooltip
+            tip = relic_desc.get(rname, rname)
+            self.add_hover(pygame.Rect(rx,ry,w,h), tip)
+            rx += w + gap
+
     def draw_enemy_panel(self):
         pnl=pygame.transform.smoothscale(ASSETS["panel"], (self.screen.get_width()-160, 200)); self.screen.blit(pnl,(80,40))
         e=self.run.enemy; self.screen.blit(pygame.transform.smoothscale(ASSETS[e.img_key], (360,220)), (self.screen.get_width()-480, 20))
@@ -386,12 +461,15 @@ class Game:
         self.screen.blit(self.font.render(("Attaque " if it[0]=='atk' else "Défense ")+str(it[1]), True, COL_ACC),(160,148))
         # status badges
         self.draw_status_badges(100, 172, e.status, who="enemy")
+    
     def draw_player_panel(self):
         pnl=pygame.transform.smoothscale(ASSETS["panel"], (self.screen.get_width()-160, 120)); self.screen.blit(pnl,(80,260))
         p=self.run.player; self.screen.blit(self.font.render(f"PV: {p.hp}/{p.max_hp}   Block: {p.block}   Énergie: {p.energy}", True, COL_GREEN),(100,300))
-        if hasattr(self.run, "relics") and self.run.relics:
-            txt = "Relique: " + ", ".join(self.run.relics)
-            self.screen.blit(self.small.render(txt, True, COL_SUB),(100,332))
+        # player status badges
+        self.draw_status_badges(100, 332, p.status, who="player")
+        # relic badges with tooltips
+        self.draw_relics(350, 330)
+
     def draw_hand(self, dt, events):
         for cv in self.card_views: cv.update(dt)
         for cv in sorted(self.card_views, key=lambda x: x.rect.y): cv.draw(self.screen, self.font, self.small)
@@ -429,6 +507,10 @@ class Game:
         for b in [start,shop,reset]: b.update(events); b.draw(self.screen)
         ess=self.font.render(f"Essence: {self.save['essence']}", True, COL_ACC); self.screen.blit(ess,(self.screen.get_width()-ess.get_width()-40,30))
     def draw_event(self, events):
+        # Si une modal d'événement est active, on la dessine et on sort
+        if self.modal and self.modal.get("type") == "rest":
+            self.draw_event_modal(events)
+            return
         self.draw_bg(); title=self.big.render("Événement", True, COL_UI)
         self.screen.blit(title,(self.screen.get_width()//2 - title.get_width()//2, 80))
         has_relic_meta = bool(self.save.get("relics_unlocked"))
@@ -446,7 +528,67 @@ class Game:
         info = self.small.render(self.event_choice_text if self.event_choice_text else "Choisissez UNE option.", True, COL_ACC if self.event_choice_text else COL_SUB)
         self.screen.blit(info,(self.screen.get_width()//2 - info.get_width()//2, y+0))
         back=Button(self.screen.get_width()//2-110, y+40, 220, 60, "Continuer", self.font, on_click=self.event_continue); back.update(events); back.draw(self.screen)
+
+    def draw_event_modal(self, events):
+        # Overlay sombre
+        sw, sh = self.screen.get_size()
+        overlay = pygame.Surface((sw, sh), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 160))
+        self.screen.blit(overlay, (0, 0))
+
+        # Avancement de l'anim
+        m = self.modal
+        m["t"] = min(m["dur"], m["t"] + getattr(self, "dt", 0.0))
+        progress = 0.0 if m["dur"] <= 0 else m["t"] / m["dur"]
+        start, target = m["start"], m["target"]
+        cur = int(start + (target - start) * progress)
+
+        # On met à jour l’affichage des PV du joueur pendant la modal
+        # (pendant l’écran event, rien d’autre ne consomme les PV, donc safe)
+        self.run.player.hp = cur
+
+        # Fenêtre centrale
+        W, H = 640, 260
+        x = sw // 2 - W // 2
+        y = sh // 2 - H // 2
+        panel = pygame.transform.smoothscale(ASSETS["panel"], (W, H))
+        self.screen.blit(panel, (x, y))
+
+        title = self.big.render("Se reposer", True, COL_UI)
+        self.screen.blit(title, (x + W // 2 - title.get_width() // 2, y + 20))
+
+        # Barre de progression basée sur les PV
+        bar_x = x + 60
+        bar_w = W - 120
+        bar_y = y + 110
+        bar_h = 28
+        pygame.draw.rect(self.screen, (40, 44, 60), (bar_x - 2, bar_y - 2, bar_w + 4, bar_h + 4), border_radius=10)
+        pygame.draw.rect(self.screen, (18, 20, 28), (bar_x, bar_y, bar_w, bar_h), border_radius=8)
+
+        max_hp = max(1, self.run.player.max_hp)
+        fill = int(bar_w * (cur / max_hp))
+        pygame.draw.rect(self.screen, (90, 200, 140), (bar_x, bar_y, fill, bar_h), border_radius=8)
+
+        # Libellés
+        txt = self.font.render(f"{cur}/{max_hp} PV", True, COL_GREEN)
+        self.screen.blit(txt, (x + W // 2 - txt.get_width() // 2, bar_y + bar_h + 10))
+
+        sub = self.small.render(f"+{target - start} PV (25% max PV)", True, COL_SUB)
+        self.screen.blit(sub, (x + W // 2 - sub.get_width() // 2, bar_y - 30))
+
+        # Bouton Continuer (cliquable seulement une fois l’anim terminée)
+        can_continue = (progress >= 1.0)
+        btn = Button(x + W // 2 - 110, y + H - 70, 220, 50, "Continuer", self.font,
+                     on_click=(lambda: self.event_rest_continue()) if can_continue else (lambda: None))
+        btn.update(events)
+        btn.draw(self.screen)
+        if not can_continue:
+            # petit indicateur "..."
+            dots = self.small.render("Récupération en cours...", True, COL_SUB)
+            self.screen.blit(dots, (x + W // 2 - dots.get_width() // 2, y + H - 100))
+
     def draw_run(self, dt, events):
+        self.hover_targets=[]
         # store for feedback positioning
         if self.run:
             self.run.screen_w, self.run.screen_h = self.screen.get_size()
@@ -460,6 +602,8 @@ class Game:
         if self.show_draw: self.draw_drawpile_panel()
         for p in self.run.particles: p.draw(self.screen)
         for d in self.run.dmg_numbers: d.draw(self.screen, self.font)
+        # tooltips on top
+        self.draw_tooltip()
         if self.run.done:
             gained=self.run.essence_gain(); overlay=pygame.Surface((sw,sh), pygame.SRCALPHA); overlay.fill((0,0,0,160))
             self.screen.blit(overlay,(0,0)); head=self.big.render("VICTOIRE" if self.run.win else "DÉFAITE", True, COL_UI)
@@ -504,10 +648,14 @@ class Game:
                 if not enabled:
                     self.event_choice_text="Option indisponible: débloquez les reliques en boutique."
                     return
-                if key=="rest":
-                    heal = max(1, self.run.player.max_hp//4)
-                    self.run.player.hp = min(self.run.player.max_hp, self.run.player.hp + heal)
-                    self.event_choice_text=f"+{heal} PV"
+                if key == "rest":
+                    heal = max(1, self.run.player.max_hp // 4)
+                    start = self.run.player.hp
+                    target = min(self.run.player.max_hp, start + heal)
+                    # Ouvre la modal d’animation de soin
+                    self.modal = {"type": "rest", "start": start, "target": target, "t": 0.0, "dur": 1.0}
+                    self.event_choice_text = f"+{target - start} PV"
+                    self.event_choice_made = True
                 elif key=="relic":
                     pool = self.save.get("relics_unlocked", [])
                     if not pool:
@@ -539,6 +687,20 @@ class Game:
         self.run.player.rebuild_piles_full(); self.run.player.new_turn(); self.layout_hand()
         self.run.enemy=enemy_for_floor(self.run.floor); self.run.enemy.choose_intent(); self.state=STATE_RUN
         self.run.player.rebuild_piles_full(); self.run.player.new_turn(); self.layout_hand()
+
+    def event_rest_continue(self):
+        # Finalise les PV et enchaîne sur le combat
+        if self.modal and self.modal.get("type") == "rest":
+            self.run.player.hp = self.modal["target"]
+        self.modal = None
+        # On enchaîne sur le combat suivant (même logique que event_continue)
+        self.run.enemy = enemy_for_floor(self.run.floor)
+        self.run.enemy.choose_intent()
+        self.state = STATE_RUN
+        self.run.player.rebuild_piles_full()
+        self.run.player.new_turn()
+        self.layout_hand()
+
     # Actions / handlers
     def start_run(self):
         self.run=Run(self.save); self.state=STATE_RUN; self.hand_area=pygame.Rect(80, self.screen.get_height()-300, self.screen.get_width()-240, 260); self.layout_hand()
@@ -625,6 +787,7 @@ class Game:
     def mainloop(self):
         while True:
             dt=self.clock.tick(FPS)/1000.0; events=pygame.event.get()
+            self.dt = dt
             for e in events:
                 if e.type==pygame.QUIT: pygame.quit(); sys.exit(0)
                 if e.type==pygame.VIDEORESIZE:
