@@ -1,4 +1,4 @@
-import pygame, sys, os, json, random, math
+import pygame, sys, os, json, random, math, tempfile
 
 WIDTH, HEIGHT = 1280, 720
 FPS = 60
@@ -11,14 +11,59 @@ def project_dir(): return os.path.dirname(os.path.abspath(__file__))
 def load_img(path): return pygame.image.load(os.path.join(project_dir(), "assets", path)).convert_alpha()
 
 def load_save():
-    path=os.path.join(project_dir(), SAVE_FILENAME)
+    """Restore the current save, keeping a broken original for recovery."""
+    path = os.path.join(project_dir(), SAVE_FILENAME)
+    defaults = {"version": 1, "essence": 0,
+                "upgrades": {"max_hp": 0, "energy": 0},
+                "unlocks": {"beam_card": False}, "relics_unlocked": []}
     if not os.path.exists(path):
-        data={"version":1,"essence":0,"upgrades":{"max_hp":0,"energy":0},"unlocks":{"beam_card":False},"relics_unlocked":[]}
-        save_save(data); return data
-    with open(path,"r",encoding="utf-8") as f: return json.load(f)
+        save_save(defaults)
+        return defaults
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        if not isinstance(raw, dict):
+            raise ValueError("Save must be a JSON object")
+    except (OSError, UnicodeError, ValueError):
+        # Preserve instead of silently overwriting a damaged player's progress.
+        backup = path + ".corrupt"
+        number = 1
+        while os.path.exists(backup):
+            backup = path + f".corrupt.{number}"
+            number += 1
+        os.replace(path, backup)
+        save_save(defaults)
+        return defaults
+
+    result = defaults.copy()
+    result["essence"] = max(0, int(raw.get("essence") or 0))
+    result["version"] = 1
+    upgrades = raw.get("upgrades")
+    result["upgrades"] = {key: max(0, int((upgrades or {}).get(key) or 0))
+                          for key in defaults["upgrades"]} if isinstance(upgrades, dict) else defaults["upgrades"].copy()
+    unlocks = raw.get("unlocks")
+    result["unlocks"] = {key: bool((unlocks or {}).get(key, False))
+                         for key in defaults["unlocks"]} if isinstance(unlocks, dict) else defaults["unlocks"].copy()
+    relics = raw.get("relics_unlocked")
+    result["relics_unlocked"] = list(dict.fromkeys(
+        item for item in relics if isinstance(item, str)
+    )) if isinstance(relics, list) else []
+    return result
+
+
 def save_save(data):
-    path=os.path.join(project_dir(), SAVE_FILENAME)
-    with open(path,"w",encoding="utf-8") as f: json.dump(data,f,indent=2)
+    """Atomic write: old progression remains intact if serialization fails."""
+    path = os.path.join(project_dir(), SAVE_FILENAME)
+    fd, tmp = tempfile.mkstemp(prefix=".decklite_", suffix=".tmp", dir=project_dir())
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2, ensure_ascii=False)
+            handle.write("\\n")
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 ASSETS={}
 def load_assets():
