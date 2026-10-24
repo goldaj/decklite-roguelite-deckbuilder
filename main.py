@@ -65,7 +65,7 @@ def save_save(data):
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(data, handle, indent=2, ensure_ascii=False)
-            handle.write("\\n")
+            handle.write("\n")
         os.replace(tmp, path)
     finally:
         if os.path.exists(tmp):
