@@ -17,7 +17,9 @@ def validate(root: Path = ROOT) -> list[str]:
 
     try:
         state = json.loads((root / "save.default.json").read_text(encoding="utf-8"))
-        if not isinstance(state, dict) or type(state.get("version")) is not int or state["version"] < 1:
+        if not isinstance(state, dict):
+            return errors + ["save.default.json: expected a JSON object"]
+        if type(state.get("version")) is not int or state["version"] < 1:
             errors.append("save.default.json: invalid version")
         if type(state.get("essence")) is not int or state["essence"] < 0:
             errors.append("save.default.json: essence must be a nonnegative integer")
