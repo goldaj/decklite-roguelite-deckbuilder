@@ -36,11 +36,17 @@ def load_save():
         save_save(defaults)
         return defaults
 
+    def nonnegative(value):
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+
     result = defaults.copy()
-    result["essence"] = max(0, int(raw.get("essence") or 0))
+    result["essence"] = nonnegative(raw.get("essence"))
     result["version"] = 1
     upgrades = raw.get("upgrades")
-    result["upgrades"] = {key: max(0, int((upgrades or {}).get(key) or 0))
+    result["upgrades"] = {key: nonnegative((upgrades or {}).get(key))
                           for key in defaults["upgrades"]} if isinstance(upgrades, dict) else defaults["upgrades"].copy()
     unlocks = raw.get("unlocks")
     result["unlocks"] = {key: bool((unlocks or {}).get(key, False))
