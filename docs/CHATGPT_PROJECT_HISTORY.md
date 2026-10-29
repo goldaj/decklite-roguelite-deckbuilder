@@ -35,3 +35,11 @@ Lorsque des exports ChatGPT authentiques sont fournis, les archiver par session,
 Contrôleur hors-ligne de syntaxe et de structure de la sauvegarde par défaut, tests de rejets et CI. Travail isolé sur `chatgpt/review-20261024`, base inchangée.
 
 **Validation et confiance** : confiance élevée dans la modification ciblée ; ne pas supposer des tests locaux exécutés. Vérifier GitHub Actions et comparer avec le travail Codex avant intégration. Ne pas fusionner automatiquement. Aucun secret ou contenu privé de manuscrit ajouté.
+
+## Intervention du 29 octobre 2026 — boss extrême optionnel (résumé non verbatim)
+
+- Demande utilisateur dans le projet : poursuivre de façon autonome les évolutions GitHub utiles et documenter Codex ; intérêt explicite antérieur pour l'équilibrage des jeux.
+- Inspection du dépôt DeckLite : branche `master` et ancienne PR #1 séparée. `Run.end_turn` laissait l'ennemi déjà mort agir avant de déclencher la victoire ; le boss étage 10 passait automatiquement au boss 11 sans reconstituer la main.
+- Branche `feat/optional-extreme-boss-combat-fix-20261029` : bloquer l'attaque d'un ennemi déjà mort, proposer de terminer la run après boss 10 ou de poursuivre sur un défi extrême avec nouvelle main/énergie et soin de 25 % PV max. Tests de l'authentique moteur `Run/Player/Enemy` avec Pygame simulé, et CI 3.10/3.12.
+- Il n'a pas été effectué de test sur interface Pygame graphique, de simulation d'équilibrage multi-seeds, ni d'accès aux sauvegardes personnelles. Seules les exécutions de CI réellement observées font foi.
+- Lire `docs/OPTIONAL_EXTREME_BOSS.md` ; comparer aux changements PR #1 et ne pas fusionner sans revue.

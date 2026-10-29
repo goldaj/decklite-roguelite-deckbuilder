@@ -311,7 +311,7 @@ class Run:
         return self.enemy and self.enemy.name.startswith("OBLITERATOR")
     def __init__(self, save):
         self.save=save; self.floor=1; self.player=Player(save); self.player.run=self; self.enemy=enemy_for_floor(self.floor); self.enemy.choose_intent()
-        self.done=False; self.win=False; self.particles=[]; self.dmg_numbers=[]; self.message=""; self.player.new_turn()
+        self.done=False; self.win=False; self.awaiting_extreme=False; self.particles=[]; self.dmg_numbers=[]; self.message=""; self.player.new_turn()
         # Extreme boss tracking
         self.obl_damage=0
         # relics per run
@@ -325,7 +325,15 @@ class Run:
         self.particles=[p for p in self.particles if p.update(dt)]
         self.dmg_numbers=[d for d in self.dmg_numbers if d.update(dt)]
     def end_turn(self):
-        self.player.end_turn(self.enemy)
+        if self.done or self.awaiting_extreme:
+            return None
+        # A dead enemy is not allowed to attack after a lethal player card.
+        if self.enemy.hp > 0:
+            self.player.end_turn(self.enemy)
+        else:
+            self.player.status["rage"]=0
+            self.player.discard.extend(self.player.hand)
+            self.player.hand.clear()
         # end of round: poison ticks, decay statuses on enemy
         if self.enemy.status.get("poison",0)>0:
             dmg=self.enemy.status["poison"]; hp0=self.enemy.hp; self.enemy.take_damage(dmg, piercing=True); self.obl_damage += max(0, hp0 - self.enemy.hp); self.enemy.status["poison"]=max(0,self.enemy.status["poison"]-1)
@@ -339,19 +347,43 @@ class Run:
             if self.floor==11:
                 self.done=True; self.win=True; return
             elif self.floor==10:
-                self.floor=11; self.player.block=0; self.enemy=enemy_for_floor(self.floor); self.enemy.choose_intent(); return None
+                # Beating the normal boss is a complete victory. Extreme is opt-in.
+                self.awaiting_extreme=True
+                self.player.block=0
+                return "extreme_choice"
             else:
                 self.floor+=1; self.player.block=0
                 if self.floor in (4,7,9): return "event"
                 self.enemy=enemy_for_floor(self.floor); self.enemy.choose_intent(); return "reward"
         self.enemy.choose_intent(); self.player.new_turn()
+    def accept_extreme(self):
+        if self.done or not self.awaiting_extreme or self.floor != 10:
+            return False
+        self.awaiting_extreme=False
+        self.floor=11
+        self.enemy=enemy_for_floor(self.floor)
+        self.enemy.choose_intent()
+        self.player.hp=min(self.player.max_hp, self.player.hp + max(1, self.player.max_hp//4))
+        self.player.block=0
+        self.player.rebuild_piles_full()
+        self.player.new_turn()
+        return True
+
+    def retire_victory(self):
+        if self.done or not self.awaiting_extreme or self.floor != 10:
+            return False
+        self.awaiting_extreme=False
+        self.done=True
+        self.win=True
+        return True
+
     def essence_gain(self):
         base = 12 * (max(0,self.floor - 1))
         if self.win: base += 120
         base += max(0, getattr(self,"obl_damage",0))
         return base
 
-STATE_MENU=0; STATE_SHOP=1; STATE_RUN=2; STATE_REWARD=3; STATE_GAMEOVER=4; STATE_EVENT=5
+STATE_MENU=0; STATE_SHOP=1; STATE_RUN=2; STATE_REWARD=3; STATE_GAMEOVER=4; STATE_EVENT=5; STATE_EXTREME_CHOICE=6
 
 class Game:
     def __init__(self):
@@ -683,6 +715,30 @@ class Game:
             self.screen.blit(self.small.render(txt, True, COL_SUB),(self.screen.get_width()//2-350, y+50))
             self.shop_rects.append((pygame.Rect(self.screen.get_width()//2-450,y,900,90), key)); y+=110
         back=Button(self.screen.get_width()//2-110, y+20, 220, 60, "Retour", self.font, on_click=self.goto_menu); back.update(events); back.draw(self.screen)
+    def draw_extreme_choice(self, events):
+        self.draw_bg()
+        sw,sh=self.screen.get_size()
+        head=self.big.render("BOSS VAINCU !", True, COL_UI)
+        self.screen.blit(head,(sw//2-head.get_width()//2, sh//2-180))
+        desc=self.small.render("Votre victoire est acquise. Défi extrême en option (+25% PV avant combat).", True, COL_SUB)
+        self.screen.blit(desc,(sw//2-desc.get_width()//2, sh//2-100))
+        btn_finish=Button(sw//2-290, sh//2+20, 270, 60, "Encaisser la victoire", self.small,
+                          on_click=self.finish_normal_run)
+        btn_extreme=Button(sw//2+20, sh//2+20, 270, 60, "Défi extrême", self.small,
+                           on_click=self.start_extreme_challenge)
+        for button in (btn_finish, btn_extreme):
+            button.update(events)
+            button.draw(self.screen)
+
+    def finish_normal_run(self):
+        if self.run and self.run.retire_victory():
+            self.state=STATE_RUN
+
+    def start_extreme_challenge(self):
+        if self.run and self.run.accept_extreme():
+            self.state=STATE_RUN
+            self.layout_hand()
+
     def draw_gameover(self, events):
         self.draw_bg(); head=self.big.render("VICTOIRE" if self.run.win else "DÉFAITE", True, COL_UI); self.screen.blit(head,(self.screen.get_width()//2 - head.get_width()//2, 140))
         ess=self.font.render(f"Essence gagnée: {self.run.essence_gain()}", True, COL_ACC); self.screen.blit(ess,(self.screen.get_width()//2 - ess.get_width()//2, 220))
@@ -762,6 +818,8 @@ class Game:
         res=self.run.end_turn()
         if res=="event":
             self.state=STATE_EVENT
+        elif res=="extreme_choice":
+            self.state=STATE_EXTREME_CHOICE
         elif res=="reward":
             pool=CardLib.pool(self.save["unlocks"]); self.reward_options=random.sample(pool,3); self.state=STATE_REWARD
         self.layout_hand()
@@ -866,6 +924,7 @@ class Game:
             elif self.state==STATE_EVENT: self.draw_event(events)
             elif self.state==STATE_REWARD: self.draw_reward(events)
             elif self.state==STATE_GAMEOVER: self.draw_gameover(events)
+            elif self.state==STATE_EXTREME_CHOICE: self.draw_extreme_choice(events)
             pygame.display.flip()
 
 if __name__=="__main__":

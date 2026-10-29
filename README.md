@@ -27,3 +27,9 @@ Il s'agit d'un prototype en développement ; sa structure monolithique fait part
 | [Idle Clicker](https://github.com/goldaj/idle-clicker-tkinter) | Clics, revenus et achats avec coût dynamique | Interface de bureau Tkinter/ttkbootstrap |
 
 Ces dépôts conservent des expériences distinctes, à différents niveaux d'avancement.
+
+## Correction de combat et boss extrême optionnel
+
+La branche `feat/optional-extreme-boss-combat-fix-20261029` corrige l'attaque d'un ennemi **déjà tué** avant la fin du tour. Après avoir vaincu le boss normal de l'étage 10, le joueur choisit désormais de **terminer la run en victoire** ou de tenter volontairement le boss extrême, avec nouvelle main/énergie et 25 % des PV max récupérés. Ce changement vise une progression plus cohérente, **sans prétendre garantir l'équilibrage global**. Lire [docs/OPTIONAL_EXTREME_BOSS.md](docs/OPTIONAL_EXTREME_BOSS.md).
+
+Tests du moteur de combat sans ouvrir Pygame : `python -m unittest discover -s tests -v`. Contrôle graphique manuel encore nécessaire.
